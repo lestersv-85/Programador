@@ -1,0 +1,27 @@
+[project]
+name = "programador"
+version = "0.1.0"
+description = "Motor MCP de triaje y extraccion documental sobre buzones IMAP multi-entidad"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+programador-mcp = "programador.server:main"
+programador-sync = "programador.sync:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
