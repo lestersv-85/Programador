@@ -300,6 +300,19 @@ class Store:
                 changed += cursor.rowcount
         return changed
 
+    def delete_message(self, key: str) -> bool:
+        """Elimina un mensaje del indice y del FTS. Las extracciones sobreviven."""
+        with self._conn:
+            self._conn.execute("DELETE FROM messages_fts WHERE key = ?", (key,))
+            cursor = self._conn.execute("DELETE FROM messages WHERE key = ?", (key,))
+        return cursor.rowcount > 0
+
+    def count_extractions_for(self, key: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM extractions WHERE message_key = ?", (key,)
+        ).fetchone()
+        return int(row["n"])
+
     def delete_folder_messages(self, account: str, folder: str, uidvalidity: int) -> int:
         """Purga una carpeta: se usa cuando el servidor cambia el UIDVALIDITY."""
         with self._conn:

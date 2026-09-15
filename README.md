@@ -149,7 +149,11 @@ Honestidad sobre los límites de esta v1:
 - **No lee el contenido de los PDF.** Guarda los adjuntos y su metadato; la
   lectura la hace Claude sobre el fichero descargado.
 - **No hay IDLE ni push.** La actualización es por sondeo (`programador-sync`).
-- **`mover` no actualiza el índice local** hasta la siguiente sincronización.
+- **Mover un correo lo saca del índice.** Su UID de origen deja de existir, así
+  que la fila se retira para que nadie actúe sobre una posición que ya no es
+  cierta. Si la carpeta de destino está en `PROGRAMADOR_FOLDERS`, vuelve a
+  indexarse en la siguiente sincronización; si no, deja de estar buscable. La
+  herramienta lo avisa en su respuesta.
 - **Nunca se ha conectado a iCloud.** Esto importa y conviene decirlo sin
   adornos. El código se escribió en un entorno sin salida a los puertos 993 y
   587. Lo que sí está probado es el protocolo: `tests/fake_imap.py` es un
@@ -165,7 +169,7 @@ Honestidad sobre los límites de esta v1:
 ## Desarrollo
 
 ```bash
-./.venv/bin/python -m pytest -q     # 102 tests, ~6 segundos
+./.venv/bin/python -m pytest -q     # 103 tests, ~5 segundos
 ```
 
 La suite tiene dos capas. Los tests unitarios usan dobles de Python y cubren el

@@ -383,12 +383,33 @@ def mover(clave: str, carpeta_destino: str) -> dict[str, Any]:
             method = client.move_message(int(message["uid"]), carpeta_destino)
     except ImapError as exc:
         return {"ok": False, "error": str(exc)}
+    # El UID del origen deja de existir tras el movimiento. Si dejaramos la fila,
+    # una llamada posterior a mover o marcar con esta misma clave apuntaria a un
+    # mensaje que ya no esta ahi, asi que se retira del indice.
+    extracciones = _ctx.store.count_extractions_for(clave)
+    _ctx.store.delete_message(clave)
+
+    destino_sincronizado = carpeta_destino in _ctx.settings.folders
+    avisos = []
+    if not destino_sincronizado:
+        avisos.append(
+            f"'{carpeta_destino}' no esta en PROGRAMADOR_FOLDERS, asi que el correo deja de "
+            "estar indexado. Anadela si quieres seguir buscandolo."
+        )
+    if extracciones:
+        avisos.append(
+            f"Las {extracciones} extraccion(es) de este correo se conservan, pero pierden el "
+            "enlace con el mensaje."
+        )
+
     return {
         "ok": True,
         "clave": clave,
         "destino": carpeta_destino,
         "metodo": method,
-        "nota": "El indice local seguira mostrandolo en la carpeta antigua hasta la proxima sincronizacion.",
+        "retirado_del_indice": True,
+        "destino_sincronizado": destino_sincronizado,
+        "avisos": avisos,
     }
 
 

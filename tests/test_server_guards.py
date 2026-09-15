@@ -96,3 +96,43 @@ def test_triaje_groups_by_entity(configured_server):
     result = srv.triaje(dias=3650)
     assert set(result["por_entidad"]) == {"rambaid", "forego_intl"}
     assert result["total"] == 2
+
+
+def test_mover_removes_the_stale_row_from_the_index(configured_server, monkeypatch, tmp_path):
+    """Tras mover, el UID de origen ya no existe: dejar la fila permitiria actuar
+    sobre un mensaje que no esta donde el indice dice."""
+    import programador.server as module
+
+    key = srv._ctx.store.upsert_message(make_message())
+    srv._ctx.store.save_extraction(
+        __import__("programador.models", fromlist=["Extraction"]).Extraction(
+            message_key=key, doc_type="invoice", entity="personal", fields={"total": 10}
+        )
+    )
+
+    class FakeClient:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def select(self, *_a, **_k):
+            return {"uidvalidity": 100}
+
+        def move_message(self, _uid, _dest):
+            return "MOVE"
+
+    monkeypatch.setattr(module, "MailboxClient", FakeClient)
+    result = srv.mover(key, "Archive")
+
+    assert result["ok"] and result["retirado_del_indice"] is True
+    assert srv._ctx.store.get_message(key) is None
+    assert srv._ctx.store.search("prueba") == [], "El indice FTS tambien debe limpiarse"
+    assert result["destino_sincronizado"] is False
+    assert any("PROGRAMADOR_FOLDERS" in aviso for aviso in result["avisos"])
+    assert any("extraccion" in aviso for aviso in result["avisos"])
+    assert srv._ctx.store.list_extractions()[0]["fields"] == {"total": 10}
