@@ -27,7 +27,13 @@ from .config import Settings
 from .mime import parse_message
 from .models import Message
 
-__all__ = ["MailboxClient", "ImapError", "quote_folder", "parse_fetch_response"]
+__all__ = [
+    "MailboxClient",
+    "ImapError",
+    "quote_folder",
+    "parse_fetch_response",
+    "parse_flags_response",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +87,27 @@ def parse_fetch_response(data: Sequence[object]) -> list[tuple[int, list[str], b
             else []
         )
         out.append((int(uid_match.group(1)), flags, bytes(payload)))
+    return out
+
+
+def parse_flags_response(data: Sequence[object]) -> dict[int, list[str]]:
+    """Extrae {uid: flags} de un `UID FETCH ... (UID FLAGS)`.
+
+    Sin BODY no hay literal, asi que el servidor responde con lineas sueltas de
+    bytes en vez de tuplas: necesita su propio parseo.
+    """
+    out: dict[int, list[str]] = {}
+    for item in data:
+        raw = item[0] if isinstance(item, tuple) and item else item
+        if not isinstance(raw, (bytes, bytearray)):
+            continue
+        uid_match = _UID_RE.search(raw)
+        flags_match = _FLAGS_RE.search(raw)
+        if not uid_match or not flags_match:
+            continue
+        out[int(uid_match.group(1))] = [
+            f.decode("ascii", "replace") for f in flags_match.group(1).split()
+        ]
     return out
 
 
@@ -154,7 +181,10 @@ class MailboxClient:
             match = _LIST_RE.match(bytes(raw).strip())
             if not match:
                 continue
-            name = match.group("name").decode("ascii", "replace").strip()
+            # utf-8 y no ascii: el protocolo manda modified UTF-7 (ASCII puro),
+            # pero un servidor con UTF8=ACCEPT envia el nombre en UTF-8 crudo y
+            # decodificarlo como ASCII lo convierte en basura irrecuperable.
+            name = match.group("name").decode("utf-8", "replace").strip()
             if name.startswith('"') and name.endswith('"'):
                 name = name[1:-1]
             folders.append(mutf7.decode(name.replace('\\"', '"')))
@@ -241,6 +271,22 @@ class MailboxClient:
                 except Exception:
                     # Un correo malformado no puede tumbar una sincronizacion de 10k.
                     logger.warning("No se pudo parsear el UID %s de %s", uid, folder, exc_info=True)
+
+    def fetch_flags(self, uids: Sequence[int]) -> dict[int, list[str]]:
+        """Solo los flags de los UID dados, sin descargar cuerpos.
+
+        Es lo que permite enterarse de que marcaste un correo como leido en el
+        iPhone sin volver a bajar el buzon entero.
+        """
+        flags: dict[int, list[str]] = {}
+        for start in range(0, len(uids), _FETCH_BATCH):
+            batch = uids[start : start + _FETCH_BATCH]
+            uid_set = ",".join(str(u) for u in batch)
+            data = _check(
+                self.connection.uid("FETCH", uid_set, "(UID FLAGS)"), f"UID FETCH FLAGS {uid_set}"
+            )
+            flags.update(parse_flags_response(data or []))
+        return flags
 
     def fetch_raw(self, uid: int) -> bytes:
         data = _check(self.connection.uid("FETCH", str(uid), "(BODY.PEEK[])"), f"UID FETCH {uid}")

@@ -15,6 +15,7 @@ class FakeClient:
         self.uids = uids
         self.search_calls: list[dict] = []
         self.fetched: list[int] = []
+        self.flags_by_uid: dict[int, list[str]] = {}
 
     def select(self, folder, *, readonly=True):
         return {"uidvalidity": self.uidvalidity, "uidnext": max(self.uids, default=0) + 1}
@@ -24,6 +25,9 @@ class FakeClient:
         if min_uid is not None:
             return [uid for uid in self.uids if uid >= min_uid]
         return list(self.uids)
+
+    def fetch_flags(self, uids):
+        return {uid: self.flags_by_uid[uid] for uid in uids if uid in self.flags_by_uid}
 
     def fetch_messages(self, uids, *, folder, uidvalidity):
         for uid in uids:
@@ -134,3 +138,25 @@ def test_resume_after_interruption_does_not_lose_messages(store, router):
     report = sync_folder(client, store, router, "INBOX", account=ACCOUNT)
     assert sorted(m["uid"] for m in store.list_messages(limit=10)) == [1, 2, 3]
     assert report.fetched == 2
+
+
+def test_flag_refresh_updates_indexed_messages(store, router):
+    client = FakeClient(uidvalidity=100, uids=[1, 2])
+    sync_folder(client, store, router, "INBOX", account=ACCOUNT, initial_days=180)
+    assert len(store.list_messages(unread_only=True, limit=10)) == 2
+
+    client.flags_by_uid = {1: ["\\Seen"]}
+    report = sync_folder(client, store, router, "INBOX", account=ACCOUNT)
+
+    assert report.flags_updated == 1
+    assert len(store.list_messages(unread_only=True, limit=10)) == 1
+
+
+def test_flag_refresh_can_be_disabled(store, router):
+    client = FakeClient(uidvalidity=100, uids=[1])
+    sync_folder(client, store, router, "INBOX", account=ACCOUNT, initial_days=180)
+    client.flags_by_uid = {1: ["\\Seen"]}
+    report = sync_folder(
+        client, store, router, "INBOX", account=ACCOUNT, refresh_flags_limit=0
+    )
+    assert report.flags_updated == 0

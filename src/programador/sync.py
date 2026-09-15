@@ -34,6 +34,7 @@ class SyncReport:
     skipped: int = 0
     uidvalidity_reset: bool = False
     first_sync: bool = False
+    flags_updated: int = 0
     error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -42,6 +43,7 @@ class SyncReport:
             "uidvalidity": self.uidvalidity,
             "fetched": self.fetched,
             "skipped_already_known": self.skipped,
+            "flags_actualizados": self.flags_updated,
             "uidvalidity_reset": self.uidvalidity_reset,
             "first_sync": self.first_sync,
             "error": self.error,
@@ -56,6 +58,7 @@ def sync_folder(
     *,
     account: str,
     initial_days: int = 180,
+    refresh_flags_limit: int = 500,
 ) -> SyncReport:
     report = SyncReport(folder=folder)
     try:
@@ -95,6 +98,19 @@ def sync_folder(
         store.upsert_message(router.apply(message))
         report.fetched += 1
         last_uid = max(last_uid, message.uid)
+
+    # Refrescamos los flags de los mensajes recientes ya indexados: es como nos
+    # enteramos de que marcaste algo como leido desde el iPhone. Solo los ultimos
+    # N para que el coste no crezca con el tamano del buzon.
+    if refresh_flags_limit > 0:
+        recent = store.recent_uids(account, folder, uidvalidity, limit=refresh_flags_limit)
+        if recent:
+            try:
+                report.flags_updated = store.update_flags(
+                    account, folder, uidvalidity, client.fetch_flags(recent)
+                )
+            except ImapError:
+                logger.warning("No se pudieron refrescar los flags de %s", folder, exc_info=True)
 
     # Avanzamos la marca aunque no llegara nada nuevo: evita repetir la busqueda
     # completa en la siguiente pasada.
@@ -165,6 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(
                     f"[{report.folder}] nuevos={report.fetched} ya_conocidos={report.skipped}"
+                    f" flags_actualizados={report.flags_updated}"
                     + (" (primera sincronizacion)" if report.first_sync else "")
                     + (" (UIDVALIDITY reiniciado)" if report.uidvalidity_reset else "")
                 )

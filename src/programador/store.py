@@ -271,6 +271,35 @@ class Store:
         ).fetchall()
         return {int(row["uid"]) for row in rows}
 
+    def recent_uids(
+        self, account: str, folder: str, uidvalidity: int, *, limit: int = 500
+    ) -> list[int]:
+        """Los UID mas recientes de una carpeta, para refrescar solo sus flags."""
+        rows = self._conn.execute(
+            """SELECT uid FROM messages WHERE account=? AND folder=? AND uidvalidity=?
+               ORDER BY uid DESC LIMIT ?""",
+            (account, folder, uidvalidity, max(0, limit)),
+        ).fetchall()
+        return [int(row["uid"]) for row in rows]
+
+    def update_flags(
+        self, account: str, folder: str, uidvalidity: int, flags_by_uid: dict[int, list[str]]
+    ) -> int:
+        """Sincroniza los flags de mensajes ya indexados. Devuelve cuantos cambiaron."""
+        if not flags_by_uid:
+            return 0
+        changed = 0
+        with self._conn:
+            for uid, flags in flags_by_uid.items():
+                serialized = json.dumps(sorted(flags))
+                cursor = self._conn.execute(
+                    """UPDATE messages SET flags=?
+                       WHERE account=? AND folder=? AND uidvalidity=? AND uid=? AND flags!=?""",
+                    (serialized, account, folder, uidvalidity, uid, serialized),
+                )
+                changed += cursor.rowcount
+        return changed
+
     def delete_folder_messages(self, account: str, folder: str, uidvalidity: int) -> int:
         """Purga una carpeta: se usa cuando el servidor cambia el UIDVALIDITY."""
         with self._conn:

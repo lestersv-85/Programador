@@ -22,6 +22,7 @@ from mcp.server.mcpserver import MCPServer
 
 from . import __version__
 from .config import ConfigError, RoutingConfig, Settings, load_routing_config, load_settings
+from .doctor import run_diagnostics
 from .imap_client import ICLOUD_SYSTEM_FOLDERS, ImapError, MailboxClient
 from .mime import attachment_payloads
 from .models import Extraction
@@ -164,6 +165,11 @@ def estado() -> dict[str, Any]:
         "sincronizacion": sync_states,
         "estadisticas": store.stats(),
     }
+
+
+@server.tool(description="Diagnostico de la cadena completa: entorno, configuracion, base de datos, puerto y login IMAP, carpetas, puerto y login SMTP. No envia ningun correo. Usalo cuando algo falle o en el primer arranque.")
+def diagnostico(sin_red: bool = False) -> dict[str, Any]:
+    return run_diagnostics(dict(os.environ), skip_network=sin_red).to_dict()
 
 
 @server.tool(description="Vista de triaje: cuanto ha entrado en los ultimos N dias, repartido por entidad y tipo documental, con los correos mas recientes de cada entidad.")

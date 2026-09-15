@@ -14,6 +14,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 programador-mcp = "programador.server:main"
 programador-sync = "programador.sync:main"
+programador-doctor = "programador.doctor:main"
 
 [build-system]
 requires = ["setuptools>=68"]

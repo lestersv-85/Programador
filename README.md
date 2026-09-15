@@ -64,6 +64,21 @@ puedes empezar a usar) una dirección distinta por empresa, esas cuatro reglas d
 reglas por dominio de remitente son el segundo mejor criterio; las de asunto,
 el último recurso.
 
+## Comprobar que todo funciona antes de sincronizar
+
+```bash
+set -a && . ./.env && set +a
+./.venv/bin/programador-doctor
+```
+
+Recorre la cadena entera en orden —entorno, configuración, base de datos, puerto
+IMAP, login IMAP, carpetas, puerto SMTP, login SMTP— y **no envía ningún correo**.
+Cuando algo falla dice qué hacer en vez de escupir una excepción de `imaplib`:
+distingue un puerto bloqueado por la red de una contraseña de app caducada, y si
+`PROGRAMADOR_FOLDERS` nombra una carpeta que no existe, te lista las reales.
+
+Con `--sin-red` comprueba solo lo local, sin tocar iCloud.
+
 ## Primera sincronización
 
 ```bash
@@ -73,7 +88,9 @@ set -a && . ./.env && set +a
 
 La primera pasada trae `PROGRAMADOR_INITIAL_DAYS` días de histórico (180 por
 defecto). Las siguientes son incrementales: solo piden los UID posteriores al
-último visto, así que tardan segundos.
+último visto, así que tardan segundos. Cada pasada refresca además los flags de
+los mensajes recientes ya indexados —sin volver a descargar cuerpos—, así que si
+marcas algo como leído en el iPhone, el índice se entera.
 
 Para sincronizar cada 15 minutos en macOS, hay un ejemplo de `launchd` en
 `scripts/com.lester.programador.sync.plist`.
@@ -92,6 +109,7 @@ deben estar disponibles para el proceso (o pásalas con `--env` al registrarlo).
 | Herramienta | Para qué |
 |---|---|
 | `estado` | Configuración (sin secretos), volumen indexado, estado de sincronización |
+| `diagnostico` | La misma cadena de comprobaciones que `programador-doctor`, desde la conversación |
 | `sincronizar` | Trae correo nuevo del buzón |
 | `triaje` | Qué ha entrado en N días, por entidad y tipo documental |
 | `listar` | Filtra por entidad, tipo documental, antigüedad, no leídos, adjuntos |
@@ -128,19 +146,30 @@ Honestidad sobre los límites de esta v1:
 
 - **Una sola cuenta.** El esquema ya guarda `account` en cada mensaje, pero el
   ciclo de sincronización recorre un único buzón.
-- **No refresca flags de correos ya indexados.** Si marcas algo como leído en el
-  iPhone, el índice local no se entera hasta que ese correo se vuelve a bajar.
 - **No lee el contenido de los PDF.** Guarda los adjuntos y su metadato; la
   lectura la hace Claude sobre el fichero descargado.
 - **No hay IDLE ni push.** La actualización es por sondeo (`programador-sync`).
 - **`mover` no actualiza el índice local** hasta la siguiente sincronización.
-- **Sin probar contra iCloud real.** El código se escribió y testeó en un
-  entorno sin salida IMAP: 76 tests cubren enrutado, parseo MIME, índice,
-  sincronización incremental y los guardas del servidor, pero la primera
-  conexión real contra `imap.mail.me.com` está pendiente de ejecutarse.
+- **Nunca se ha conectado a iCloud.** Esto importa y conviene decirlo sin
+  adornos. El código se escribió en un entorno sin salida a los puertos 993 y
+  587. Lo que sí está probado es el protocolo: `tests/fake_imap.py` es un
+  servidor IMAP4rev1 que habla por un socket de verdad, y los tests de
+  integración corren el cliente auténtico sobre `imaplib` auténtico contra él
+  —literales `{n}` en `UID FETCH`, formato de `LIST` y `STATUS`, el eco del
+  comodín en `UID SEARCH`, `MOVE` y su alternativa `COPY+EXPUNGE`, carpetas con
+  acentos. Ese servidor ya destapó un fallo real que los dobles de Python no
+  podían ver: `LIST` decodificaba los nombres a ASCII y destruía cualquier
+  carpeta con tilde. Aun así, iCloud tendrá sus propias rarezas: ejecuta
+  `programador-doctor` antes que nada.
 
 ## Desarrollo
 
 ```bash
-./.venv/bin/python -m pytest -q
+./.venv/bin/python -m pytest -q     # 102 tests, ~6 segundos
 ```
+
+La suite tiene dos capas. Los tests unitarios usan dobles de Python y cubren el
+enrutado, el parseo MIME, el índice y la lógica de sincronización. Los de
+integración (`test_integration_imap.py`, `test_doctor.py`) levantan el servidor
+IMAP falso y ejercitan el cliente real sobre el protocolo real. Cuando toques
+`imap_client.py`, los que importan son los segundos.
