@@ -9,7 +9,7 @@ import pytest
 
 from conftest import make_message
 from programador.config import load_settings
-from programador.publish import BATCH_SIZE, BODY_LIMIT, LOG_TABLE, MESSAGES_TABLE, publish
+from programador.publish import BATCH_SIZE, BODY_LIMIT, RPC_NAME, publish
 
 
 class FakePostgrest:
@@ -54,8 +54,14 @@ class FakePostgrest:
         self._server.shutdown()
         self._server.server_close()
 
-    def posts_to(self, table: str) -> list[dict]:
-        return [r for r in self.requests if r["path"].endswith(f"/rest/v1/{table}")]
+    def rpc_calls(self) -> list[dict]:
+        return [r for r in self.requests if r["path"].endswith(f"/rest/v1/rpc/{RPC_NAME}")]
+
+    def message_batches(self) -> list[list[dict]]:
+        return [r["body"]["mensajes"] for r in self.rpc_calls() if r["body"]["mensajes"]]
+
+    def estado_rows(self) -> list[dict]:
+        return [r["body"]["estado"] for r in self.rpc_calls() if r["body"]["estado"]]
 
 
 def _settings(url: str, key: str = "sb_publishable_test", days: str = "3"):
@@ -95,21 +101,22 @@ def test_publishes_only_the_recent_window_with_write_only_headers(store):
     assert report.error is None
     assert (report.candidates, report.sent, report.batches) == (1, 1, 1)
 
-    posts = server.posts_to(MESSAGES_TABLE)
-    assert len(posts) == 1
-    assert [row["subject"] for row in posts[0]["body"]] == ["reciente"]
-    headers = posts[0]["headers"]
+    batches = server.message_batches()
+    assert len(batches) == 1
+    assert [row["subject"] for row in batches[0]] == ["reciente"]
+    assert all(r["path"].endswith(f"/rest/v1/rpc/{RPC_NAME}") for r in server.requests), (
+        "Toda escritura pasa por la RPC: la clave no tiene acceso directo a las tablas"
+    )
+    headers = server.rpc_calls()[0]["headers"]
     assert headers["apikey"] == "eyJ.legacy.jwt"
     assert headers["authorization"] == "Bearer eyJ.legacy.jwt"
-    assert "ignore-duplicates" in headers["prefer"], "Sin UPDATE no hace falta permiso de lectura"
-    assert "return=minimal" in headers["prefer"]
 
 
 def test_new_style_publishable_key_is_not_sent_as_bearer(store):
     store.upsert_message(make_message(uid=1, date_utc=NOW))
     with FakePostgrest() as server:
         publish(store, _settings(server.url, key="sb_publishable_abc"), now=NOW)
-    headers = server.posts_to(MESSAGES_TABLE)[0]["headers"]
+    headers = server.rpc_calls()[0]["headers"]
     assert headers["apikey"] == "sb_publishable_abc"
     assert "authorization" not in headers
 
@@ -119,17 +126,18 @@ def test_publishes_a_sync_log_row_after_the_messages(store):
     with FakePostgrest() as server:
         publish(store, _settings(server.url), now=NOW)
 
-    log_posts = server.posts_to(LOG_TABLE)
-    assert len(log_posts) == 1
-    row = log_posts[0]["body"][0]
+    estados = server.estado_rows()
+    assert len(estados) == 1
+    row = estados[0]
     assert row["account"] == "lestersv@icloud.com"
     assert row["publicados"] == 1
     assert row["total_mensajes"] == 1
     assert row["ventana_dias"] == 3
     assert row["error"] is None
     assert row["synced_at"].startswith("2026-09-15T12:00:00")
-    # El log va despues de los mensajes: si el brief ve el log, los mensajes ya estan.
-    assert server.requests[-1]["path"].endswith(LOG_TABLE)
+    # El estado va en la ultima llamada y sin mensajes: si el brief lo ve, los mensajes ya estan.
+    last = server.requests[-1]["body"]
+    assert last["estado"] is not None and last["mensajes"] == []
 
 
 def test_batches_large_windows(store):
@@ -140,7 +148,7 @@ def test_batches_large_windows(store):
 
     assert report.sent == BATCH_SIZE + 50
     assert report.batches == 2
-    sizes = [len(p["body"]) for p in server.posts_to(MESSAGES_TABLE)]
+    sizes = [len(b) for b in server.message_batches()]
     assert sizes == [BATCH_SIZE, 50]
 
 
@@ -148,7 +156,7 @@ def test_body_is_truncated_and_flagged(store):
     store.upsert_message(make_message(uid=1, date_utc=NOW, body_text="x" * (BODY_LIMIT + 100)))
     with FakePostgrest() as server:
         publish(store, _settings(server.url), now=NOW)
-    row = server.posts_to(MESSAGES_TABLE)[0]["body"][0]
+    row = server.message_batches()[0][0]
     assert len(row["body_text"]) == BODY_LIMIT
     assert row["body_truncado"] is True
     assert row["attachments"] == []
@@ -164,8 +172,8 @@ def test_server_error_is_reported_not_raised_and_logged(store):
     assert "500" in report.error
     assert report.sent == 0
     # Intenta dejar constancia del fallo en el log aunque el servidor este mal.
-    assert server.posts_to(LOG_TABLE), "Debe intentar registrar el error"
-    assert server.posts_to(LOG_TABLE)[-1]["body"][0]["error"]
+    assert server.estado_rows(), "Debe intentar registrar el error"
+    assert server.estado_rows()[-1]["error"]
 
 
 def test_unreachable_supabase_is_reported(store):
@@ -205,4 +213,4 @@ def test_sync_cli_publishes_after_sync(monkeypatch, tmp_path, capsys):
 
     assert exit_code == 0
     assert "[supabase] publicados 1/1" in capsys.readouterr().out
-    assert server.posts_to(MESSAGES_TABLE) and server.posts_to(LOG_TABLE)
+    assert server.message_batches() and server.estado_rows()

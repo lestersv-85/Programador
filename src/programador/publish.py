@@ -6,14 +6,18 @@ ClientHello por el mismo tunel recibe ServerHello de www.icloud.com:443 y cero
 bytes de imap.mail.me.com:993. Asi que el IMAP lo hace el Mac y aqui se sube por
 HTTPS lo que el brief necesita: los ultimos dias, ya enrutados.
 
-Escritura ciega a proposito: la clave publicable de Supabase solo tiene permiso
-de INSERT (RLS), nunca de lectura. Si esa clave se filtrara, lo peor que puede
-pasar es que alguien meta filas basura; no puede leer tu correo. La lectura la
-hace el brief con el conector de Supabase, que usa la clave de servicio.
+Escritura ciega a proposito: la clave publicable de Supabase no tiene NINGUN
+privilegio sobre las tablas; solo puede ejecutar la funcion RPC
+`programador_publicar` (SECURITY DEFINER), que hace el upsert como propietario.
+Si esa clave se filtrara, lo peor que puede pasar es que alguien meta filas
+basura; no puede leer tu correo. La lectura la hace el brief con el conector de
+Supabase, que usa la clave de servicio.
 
-Se inserta con `resolution=ignore-duplicates` (INSERT ... ON CONFLICT DO
-NOTHING): sin UPDATE no hace falta ningun permiso de lectura, a cambio de que un
-mensaje ya publicado no se corrige si cambian sus flags o su enrutado.
+Por que una funcion y no un INSERT: Postgres exige que toda fila devuelta por
+RETURNING pase una politica de SELECT, y PostgREST siempre usa RETURNING, asi
+que "insertar sin poder leer" no se puede expresar con politicas. La funcion
+ademas permite un upsert de verdad: si cambian los flags o el enrutado de un
+mensaje ya publicado, se corrigen en la siguiente publicacion.
 """
 
 from __future__ import annotations
@@ -29,12 +33,11 @@ from urllib import error, request
 from .config import Settings
 from .store import Store
 
-__all__ = ["PublishError", "PublishReport", "publish", "MESSAGES_TABLE", "LOG_TABLE"]
+__all__ = ["PublishError", "PublishReport", "publish", "RPC_NAME"]
 
 logger = logging.getLogger(__name__)
 
-MESSAGES_TABLE = "programador_mensajes"
-LOG_TABLE = "programador_sync_log"
+RPC_NAME = "programador_publicar"
 BATCH_SIZE = 200
 BODY_LIMIT = 4000
 PAGE_SIZE = 500
@@ -97,12 +100,18 @@ def _row(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _post(settings: Settings, table: str, payload: list[dict[str, Any]], opener: Opener) -> None:
-    url = f"{settings.supabase_url.rstrip('/')}/rest/v1/{table}"
+def _call(
+    settings: Settings,
+    mensajes: list[dict[str, Any]],
+    estado: dict[str, Any] | None,
+    opener: Opener,
+) -> None:
+    """Una llamada a la RPC: un lote de mensajes y, opcionalmente, la fila de estado."""
+    url = f"{settings.supabase_url.rstrip('/')}/rest/v1/rpc/{RPC_NAME}"
+    payload: dict[str, Any] = {"mensajes": mensajes, "estado": estado}
     headers = {
         "apikey": settings.supabase_key,
         "Content-Type": "application/json",
-        "Prefer": "resolution=ignore-duplicates,return=minimal",
     }
     # Las claves legadas son JWT y van tambien como Bearer; las nuevas
     # (sb_publishable_...) no son JWT y la pasarela las rechaza en Authorization.
@@ -118,12 +127,12 @@ def _post(settings: Settings, table: str, payload: list[dict[str, Any]], opener:
         response = opener(req)
     except error.HTTPError as exc:
         detail = exc.read()[:300].decode("utf-8", "replace")
-        raise PublishError(f"Supabase respondio {exc.code} en {table}: {detail}") from exc
+        raise PublishError(f"Supabase respondio {exc.code} en {RPC_NAME}: {detail}") from exc
     except (error.URLError, OSError) as exc:
         raise PublishError(f"No se pudo alcanzar Supabase ({settings.supabase_url}): {exc}") from exc
     status = getattr(response, "status", 200)
     if status >= 300:
-        raise PublishError(f"Supabase respondio {status} en {table}")
+        raise PublishError(f"Supabase respondio {status} en {RPC_NAME}")
 
 
 def _recent_rows(store: Store, since_iso: str) -> list[dict[str, Any]]:
@@ -170,11 +179,13 @@ def publish(
     try:
         for start in range(0, len(rows), BATCH_SIZE):
             batch = rows[start : start + BATCH_SIZE]
-            _post(settings, MESSAGES_TABLE, batch, send)
+            _call(settings, batch, None, send)
             report.batches += 1
             report.sent += len(batch)
+        # La fila de estado va en una llamada aparte y al final: si el brief la
+        # ve, los mensajes ya estan.
         log_row["publicados"] = report.sent
-        _post(settings, LOG_TABLE, [log_row], send)
+        _call(settings, [], log_row, send)
     except PublishError as exc:
         report.error = str(exc)
         logger.warning("Publicacion en Supabase fallida: %s", exc)
@@ -182,7 +193,7 @@ def publish(
         log_row["publicados"] = report.sent
         log_row["error"] = str(exc)[:500]
         try:
-            _post(settings, LOG_TABLE, [log_row], send)
+            _call(settings, [], log_row, send)
         except PublishError:
             logger.debug("Tampoco se pudo registrar el error en Supabase", exc_info=True)
     return report

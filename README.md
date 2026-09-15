@@ -170,16 +170,20 @@ programador-sync ──IMAP──> iCloud                Resumen matutino
 
 ### Modelo de seguridad
 
-La clave que va en el Mac es la **publicable** (`sb_publishable_…`) del proyecto,
-y por RLS **solo puede insertar**: tiene el privilegio `SELECT` que PostgREST
-exige para funcionar, pero ninguna política de `SELECT`, así que cualquier
-lectura con esa clave devuelve vacío. Si se filtrara, lo peor posible es que
-alguien meta filas basura; no puede leer tu correo. El brief lee con la clave
-de servicio a través del conector de Supabase, que nunca sale de Anthropic.
+La clave que va en el Mac es la **publicable** (`sb_publishable_…`) del
+proyecto, y **no tiene ningún privilegio sobre las tablas**: lo único que puede
+hacer es ejecutar la función `programador_publicar` (`SECURITY DEFINER`), que
+hace el upsert como propietario. RLS sigue activo en ambas tablas sin ninguna
+política. Si la clave se filtrara, lo peor posible es que alguien meta filas
+basura; no puede leer tu correo. El brief lee con la clave de servicio a través
+del conector de Supabase, que nunca sale de Anthropic.
 
-Se inserta con `resolution=ignore-duplicates` (`ON CONFLICT DO NOTHING`): sin
-`UPDATE` no hace falta ningún permiso más, a cambio de que un mensaje ya
-publicado no se corrige si después cambian sus flags o su enrutado.
+Por qué una función y no un `INSERT` directo: Postgres exige que toda fila
+devuelta por `RETURNING` pase una política de `SELECT`, y PostgREST siempre usa
+`RETURNING`. «Insertar sin poder leer» no se puede expresar con políticas; se
+comprobó reproduciendo el fallo en SQL puro como `anon`. La función además
+permite un upsert real: si cambian los flags o el enrutado de un mensaje ya
+publicado, se corrigen en la siguiente publicación.
 
 ### Poner el Mac a publicar
 
