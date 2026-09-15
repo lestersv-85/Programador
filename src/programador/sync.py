@@ -18,6 +18,7 @@ from typing import Callable, Sequence
 from .config import ConfigError, Settings, load_routing_config, load_settings
 from .imap_client import ImapError, MailboxClient
 from .models import SyncState
+from .publish import publish
 from .routing import Router
 from .store import Store
 
@@ -153,6 +154,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Sincroniza el buzon IMAP configurado con la base local.",
     )
     parser.add_argument("--folder", action="append", dest="folders", help="Carpeta (repetible)")
+    parser.add_argument(
+        "--no-publish", action="store_true", help="No publicar en Supabase aunque este configurado"
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -190,7 +194,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"Total en base: {stats['total_messages']} mensajes | "
             f"por entidad: {stats['by_entity']}"
         )
-    return 1 if any(r.error for r in reports) else 0
+        publish_failed = False
+        if not args.no_publish:
+            pub = publish(store, settings)
+            if pub.enabled:
+                if pub.error:
+                    publish_failed = True
+                    print(f"[supabase] ERROR: {pub.error}", file=sys.stderr)
+                else:
+                    print(
+                        f"[supabase] publicados {pub.sent}/{pub.candidates} mensajes "
+                        f"de los ultimos {pub.days} dias en {pub.batches} lote(s)"
+                    )
+    return 1 if (any(r.error for r in reports) or publish_failed) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -36,6 +36,14 @@ class Settings:
     attachments_dir: Path = Path("./attachments")
     folders: tuple[str, ...] = ("INBOX",)
     initial_days: int = 180
+    # Publicacion opcional de la ventana reciente en Supabase (ver publish.py).
+    supabase_url: str = ""
+    supabase_key: str = ""
+    publish_days: int = 3
+
+    @property
+    def publish_enabled(self) -> bool:
+        return bool(self.supabase_url and self.supabase_key)
 
     def redacted(self) -> dict[str, object]:
         """Vista segura para diagnostico: sin contrasena."""
@@ -49,6 +57,9 @@ class Settings:
             "folders": list(self.folders),
             "initial_days": self.initial_days,
             "app_password": "<set>" if self.app_password else "<MISSING>",
+            "supabase_url": self.supabase_url or "<not set>",
+            "supabase_key": "<set>" if self.supabase_key else "<not set>",
+            "publish_days": self.publish_days,
         }
 
 
@@ -94,6 +105,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         attachments_dir=Path(source.get("PROGRAMADOR_ATTACHMENTS_DIR", "./attachments")),
         folders=folders,
         initial_days=int(source.get("PROGRAMADOR_INITIAL_DAYS", "180")),
+        supabase_url=source.get("PROGRAMADOR_SUPABASE_URL", "").strip(),
+        supabase_key=source.get("PROGRAMADOR_SUPABASE_KEY", "").strip(),
+        publish_days=int(source.get("PROGRAMADOR_PUBLISH_DAYS", "3")),
     )
 
 

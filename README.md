@@ -140,6 +140,68 @@ Flujo típico en conversación:
   `"` o un `*` en la consulta no cambian lo que se busca ni revientan el índice.
 - Todo el correo indexado vive en un SQLite local. No sale de tu máquina.
 
+## Que el resumen matutino lea iCloud directo: el Mac publica en Supabase
+
+Las sesiones de Claude en la nube —donde corre el resumen matutino— **no pueden
+hablar IMAP**. Se comprobó con un control, no con una suposición: el mismo
+`ClientHello` por el mismo túnel del proxy recibe un `ServerHello` real de
+`www.icloud.com:443` y cero bytes seguidos de un reset de `imap.mail.me.com:993`;
+por `smtp.mail.me.com:587` no llega ni el saludo. El relé de egreso solo
+transporta HTTPS. No es una casilla de política: es la arquitectura.
+
+Así que la lectura directa de iCloud se reparte en dos piezas que sí encajan:
+
+```
+Mac (launchd, cada 15 min)                      Nube (08:00 La Habana)
+programador-sync ──IMAP──> iCloud                Resumen matutino
+        └── publica por HTTPS ──> Supabase <──── lee con su conector
+                                  (programador_mensajes,
+                                   programador_sync_log)
+```
+
+- **El Mac** sincroniza por IMAP como siempre y, si `PROGRAMADOR_SUPABASE_URL` y
+  `PROGRAMADOR_SUPABASE_KEY` están en `.env`, sube los últimos
+  `PROGRAMADOR_PUBLISH_DAYS` días (3 por defecto) a la tabla
+  `public.programador_mensajes`, ya enrutados por entidad y con sus pistas
+  documentales, y una fila de estado a `public.programador_sync_log`.
+- **El brief** mira primero el último `programador_sync_log`: si tiene más de
+  12 horas, dice que iCloud no se ha sincronizado desde entonces —el Mac estaba
+  apagado— en vez de presentar correo rancio como actual.
+
+### Modelo de seguridad
+
+La clave que va en el Mac es la **publicable** (`sb_publishable_…`) del proyecto,
+y por RLS **solo puede insertar**: tiene el privilegio `SELECT` que PostgREST
+exige para funcionar, pero ninguna política de `SELECT`, así que cualquier
+lectura con esa clave devuelve vacío. Si se filtrara, lo peor posible es que
+alguien meta filas basura; no puede leer tu correo. El brief lee con la clave
+de servicio a través del conector de Supabase, que nunca sale de Anthropic.
+
+Se inserta con `resolution=ignore-duplicates` (`ON CONFLICT DO NOTHING`): sin
+`UPDATE` no hace falta ningún permiso más, a cambio de que un mensaje ya
+publicado no se corrige si después cambian sus flags o su enrutado.
+
+### Poner el Mac a publicar
+
+Es el único trabajo que queda en tus manos, y es una vez:
+
+1. `account.apple.com` → Contraseñas específicas de app → una nueva para
+   «Programador».
+2. `git clone` de este repositorio, `python3 -m venv .venv`,
+   `./.venv/bin/pip install -e .`.
+3. `cp .env.example .env` y rellena `PROGRAMADOR_APP_PASSWORD` y
+   `PROGRAMADOR_SUPABASE_KEY` (la URL ya viene puesta).
+4. `cp config/entities.example.yaml config/entities.yaml` (los `CAMBIAME` puedes
+   dejarlos para después: sin ellos todo cae en `personal`, que ya es útil).
+5. `set -a && . ./.env && set +a && ./.venv/bin/programador-doctor` y después
+   `./.venv/bin/programador-sync`. La primera línea `[supabase] publicados …`
+   es la confirmación.
+6. `scripts/com.lester.programador.sync.plist` a `~/Library/LaunchAgents/` con
+   las rutas cambiadas, y `launchctl load`.
+
+A partir de ahí el brief del día siguiente lee iCloud sin Mailopoly y sin
+reenvíos. Si el Mac está apagado a las 08:00, el brief lo dice; no inventa.
+
 ## Qué NO hace todavía
 
 Honestidad sobre los límites de esta v1:
@@ -169,7 +231,7 @@ Honestidad sobre los límites de esta v1:
 ## Desarrollo
 
 ```bash
-./.venv/bin/python -m pytest -q     # 103 tests, ~5 segundos
+./.venv/bin/python -m pytest -q     # 113 tests, ~9 segundos
 ```
 
 La suite tiene dos capas. Los tests unitarios usan dobles de Python y cubren el

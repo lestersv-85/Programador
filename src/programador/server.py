@@ -26,6 +26,7 @@ from .doctor import run_diagnostics
 from .imap_client import ICLOUD_SYSTEM_FOLDERS, ImapError, MailboxClient
 from .mime import attachment_payloads
 from .models import Extraction
+from .publish import publish
 from .routing import Router
 from .smtp_client import SmtpError, build_message, send_message
 from .store import Store
@@ -349,9 +350,11 @@ def sincronizar(carpetas: list[str] | None = None) -> dict[str, Any]:
         reports = sync_all(_ctx.settings, _ctx.store, _ctx.router, folders=carpetas)
     except ImapError as exc:
         return {"ok": False, "error": str(exc)}
+    publicacion = publish(_ctx.store, _ctx.settings).to_dict()
     return {
-        "ok": all(r.error is None for r in reports),
+        "ok": all(r.error is None for r in reports) and not publicacion.get("error"),
         "carpetas": [r.to_dict() for r in reports],
+        "publicacion_supabase": publicacion,
         "estadisticas": _ctx.store.stats(),
     }
 
