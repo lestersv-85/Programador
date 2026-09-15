@@ -199,6 +199,11 @@ Es el único trabajo que queda en tus manos, y es una vez:
 6. `scripts/com.lester.programador.sync.plist` a `~/Library/LaunchAgents/` con
    las rutas cambiadas, y `launchctl load`.
 
+7. La rutina «Resumen matutino» necesita el conector de Supabase, y las rutinas
+   creadas por API en esta organización no admiten conectores: se edita una vez
+   desde claude.ai (Rutinas → Resumen matutino → Conectores → Supabase) y se
+   pega el prompt de `docs/prompt-resumen-matutino.md`.
+
 A partir de ahí el brief del día siguiente lee iCloud sin Mailopoly y sin
 reenvíos. Si el Mac está apagado a las 08:00, el brief lo dice; no inventa.
 
