@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sincronizacion periodica en macOS.
+  Instalacion:
+    1. Edita las rutas de abajo (RUTA_AL_REPO) y tu usuario.
+    2. cp scripts/com.lester.programador.sync.plist ~/Library/LaunchAgents/
+    3. launchctl load ~/Library/LaunchAgents/com.lester.programador.sync.plist
+  Comprobar:  launchctl list | grep programador
+  Parar:      launchctl unload ~/Library/LaunchAgents/com.lester.programador.sync.plist
+
+  La contrasena de app NO va aqui: se lee del .env que carga el propio wrapper.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lester.programador.sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd RUTA_AL_REPO &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; ./.venv/bin/programador-sync</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>RUTA_AL_REPO/logs/sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>RUTA_AL_REPO/logs/sync.err.log</string>
+</dict>
+</plist>

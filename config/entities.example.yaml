@@ -1,0 +1,173 @@
+# Programador - configuracion de enrutado multi-entidad.
+#
+# Copia este fichero a config/entities.yaml y rellena los dominios y direcciones
+# reales. config/entities.yaml esta en .gitignore: no se sube al repositorio,
+# porque revela tu mapa de contrapartes comerciales.
+#
+# El enrutado es DETERMINISTA: se evaluan las reglas por prioridad descendente y
+# gana la primera que casa. No hay IA aqui a proposito -- las reglas son
+# auditables, reproducibles y gratis. El trabajo semantico (leer un adjunto y
+# sacar el importe de una factura) lo hace Claude a traves del servidor MCP.
+
+default_entity: personal
+
+entities:
+  - id: rambaid
+    name: "Rambaid Iberica SL"
+    jurisdiction: ES
+    description: "Energia solar y COMEX. Espana."
+  - id: ecme_forego
+    name: "AEI ECME-FOREGO"
+    jurisdiction: CU
+    description: "Asociacion economica internacional. La Habana."
+  - id: forego_intl
+    name: "FOREGO INTERNATIONAL LTD"
+    jurisdiction: VG
+    description: "Compraventa internacional. Islas Virgenes Britanicas."
+  - id: sand
+    name: "S@ND SRL"
+    jurisdiction: CU
+    description: "La Habana."
+  - id: personal
+    name: "Personal"
+    jurisdiction: null
+    description: "Todo lo que no es de ninguna entidad."
+
+# ---------------------------------------------------------------------------
+# Reglas de enrutado. Dentro de una regla, los criterios se combinan con OR:
+# basta que uno case. Prioridad mas alta = se evalua antes.
+#
+# Criterios disponibles:
+#   from_domain      dominio exacto del remitente (sin @)
+#   from_addr        direccion exacta del remitente
+#   to_addr          direccion exacta en To/Cc (util si usas alias por empresa)
+#   subject_contains subcadena en el asunto (sin distinguir mayusculas/acentos)
+#   body_contains    subcadena en el cuerpo (sin distinguir mayusculas/acentos)
+# ---------------------------------------------------------------------------
+routing_rules:
+  # --- Alias propios: el criterio mas fiable que existe. Si usas una direccion
+  # --- distinta por empresa, esto resuelve el 90% del enrutado por si solo.
+  - entity: rambaid
+    priority: 100
+    match:
+      to_addr:
+        - "CAMBIAME-rambaid@tudominio.es"     # TODO: tu alias de Rambaid
+  - entity: forego_intl
+    priority: 100
+    match:
+      to_addr:
+        - "CAMBIAME-forego@tudominio.com"     # TODO: tu alias de FOREGO
+  - entity: ecme_forego
+    priority: 100
+    match:
+      to_addr:
+        - "CAMBIAME-ecme@tudominio.cu"        # TODO: tu alias de ECME-FOREGO
+  - entity: sand
+    priority: 100
+    match:
+      to_addr:
+        - "CAMBIAME-sand@tudominio.cu"        # TODO: tu alias de S@ND
+
+  # --- Contrapartes por dominio. Anade aqui proveedores, clientes, bancos,
+  # --- navieras y agentes de aduanas de cada entidad.
+  - entity: rambaid
+    priority: 60
+    match:
+      from_domain:
+        - "CAMBIAME-proveedor-solar.com"      # TODO: proveedores FV
+      subject_contains:
+        - "rambaid"
+  - entity: forego_intl
+    priority: 60
+    match:
+      subject_contains:
+        - "forego international"
+        - "forego intl"
+  - entity: ecme_forego
+    priority: 60
+    match:
+      subject_contains:
+        - "ecme"
+  - entity: sand
+    priority: 60
+    match:
+      subject_contains:
+        - "s@nd"
+        - "sand srl"
+
+  # --- Administracion espanola: siempre Rambaid.
+  - entity: rambaid
+    priority: 80
+    match:
+      from_domain:
+        - "agenciatributaria.gob.es"
+        - "correo.aeat.es"
+        - "seg-social.es"
+        - "registradores.org"
+
+# ---------------------------------------------------------------------------
+# Pistas de tipo documental. Son SUGERENCIAS baratas que marcan el correo para
+# que lo mires (o para que Claude lo lea y extraiga los campos). No sustituyen
+# a la lectura: un correo marcado invoice puede no serlo.
+# Se busca en asunto, cuerpo y nombres de adjuntos, sin acentos ni mayusculas.
+# ---------------------------------------------------------------------------
+doc_type_hints:
+  invoice:
+    - "factura"
+    - "invoice"
+    - "factura comercial"
+    - "commercial invoice"
+  proforma:
+    - "proforma"
+    - "pro forma"
+    - "cotizacion"
+    - "quotation"
+    - "presupuesto"
+  purchase_order:
+    - "orden de compra"
+    - "purchase order"
+    - "pedido n"
+  bill_of_lading:
+    - "conocimiento de embarque"
+    - "bill of lading"
+    - "b/l"
+    - "air waybill"
+    - "carta de porte"
+  packing_list:
+    - "packing list"
+    - "lista de empaque"
+    - "lista de bultos"
+  customs:
+    - "aduana"
+    - "despacho aduanero"
+    - "customs"
+    - "arancel"
+    - "partida arancelaria"
+    - "hs code"
+  payment:
+    - "transferencia"
+    - "swift"
+    - "comprobante de pago"
+    - "wire transfer"
+    - "remesa"
+  contract:
+    - "contrato"
+    - "agreement"
+    - "addendum"
+    - "memorando de entendimiento"
+  certificate:
+    - "certificado de origen"
+    - "certificate of origin"
+    - "certificado de calidad"
+  shipping:
+    - "embarque"
+    - "shipment"
+    - "contenedor"
+    - "container"
+    - "booking"
+    - "naviera"
+  tax:
+    - "modelo 303"
+    - "modelo 347"
+    - "declaracion de iva"
+    - "agencia tributaria"
