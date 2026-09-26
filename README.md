@@ -140,76 +140,82 @@ Flujo típico en conversación:
   `"` o un `*` en la consulta no cambian lo que se busca ni revientan el índice.
 - Todo el correo indexado vive en un SQLite local. No sale de tu máquina.
 
-## Que el resumen matutino lea iCloud directo: el Mac publica en Supabase
+## Que el resumen matutino lea iCloud directo: el lector vive en Supabase
 
 Las sesiones de Claude en la nube —donde corre el resumen matutino— **no pueden
 hablar IMAP**. Se comprobó con un control, no con una suposición: el mismo
 `ClientHello` por el mismo túnel del proxy recibe un `ServerHello` real de
-`www.icloud.com:443` y cero bytes seguidos de un reset de `imap.mail.me.com:993`;
-por `smtp.mail.me.com:587` no llega ni el saludo. El relé de egreso solo
-transporta HTTPS. No es una casilla de política: es la arquitectura.
+`www.icloud.com:443` y cero bytes seguidos de un reset de `imap.mail.me.com:993`.
+El relé de egreso solo transporta HTTPS. No es una casilla de política: es la
+arquitectura.
 
-Así que la lectura directa de iCloud se reparte en dos piezas que sí encajan:
+Lo que sí puede hablar IMAP es una **Edge Function de Supabase**: el 26 sep 2026
+una sonda desplegada en el proyecto abrió TLS crudo contra
+`imap.mail.me.com:993` y leyó el saludo del servidor en 328 ms. Así que el
+lector se movió allí y el Mac dejó de ser necesario:
 
 ```
-Mac (launchd, cada 15 min)                      Nube (08:00 La Habana)
-programador-sync ──IMAP──> iCloud                Resumen matutino
-        └── publica por HTTPS ──> Supabase <──── lee con su conector
-                                  (programador_mensajes,
-                                   programador_sync_log)
+Supabase (pg_cron, cada 10 min)                         Nube (08:00 La Habana)
+programador-sync (Edge Function) ──IMAP──> iCloud        Resumen matutino
+        └── publica con programador_publicar ──> tablas <── lee con su conector
+                                       (programador_mensajes,
+                                        programador_sync_log)
 ```
 
-- **El Mac** sincroniza por IMAP como siempre y, si `PROGRAMADOR_SUPABASE_URL` y
-  `PROGRAMADOR_SUPABASE_KEY` están en `.env`, sube los últimos
-  `PROGRAMADOR_PUBLISH_DAYS` días (3 por defecto) a la tabla
-  `public.programador_mensajes`, ya enrutados por entidad y con sus pistas
-  documentales, y una fila de estado a `public.programador_sync_log`.
-- **El brief** mira primero el último `programador_sync_log`: si tiene más de
-  12 horas, dice que iCloud no se ha sincronizado desde entonces —el Mac estaba
-  apagado— en vez de presentar correo rancio como actual.
+- `supabase/functions/programador-sync/index.ts`: cliente IMAP mínimo sobre
+  `Deno.connectTls` (LOGIN, SELECT, UID SEARCH, UID FETCH con `BODY.PEEK`,
+  BODYSTRUCTURE para elegir la parte de texto y listar adjuntos), decodificación
+  RFC 2047 / quoted-printable / base64 / HTML→texto, enrutado por entidad con
+  las reglas de `public.programador_reglas` y pistas documentales ES/EN.
+  Sincroniza `INBOX` y `Sent Messages`, incremental por `(UIDVALIDITY, UID)`
+  (estado en `public.programador_sync_state`), reconcilia flags y borra de las
+  tablas lo que desapareció del buzón, y deja una fila en `programador_sync_log`
+  en cada pasada, con el error si lo hubo.
+- `supabase/migrations/20260926150000_programador_sync_en_supabase.sql`:
+  extensiones `pg_cron` y `pg_net`, tablas de estado y reglas, la función
+  `programador_secreto` y el `cron.schedule` que llama a la Edge Function cada
+  10 minutos.
 
 ### Modelo de seguridad
 
-La clave que va en el Mac es la **publicable** (`sb_publishable_…`) del
-proyecto, y **no tiene ningún privilegio sobre las tablas**: lo único que puede
-hacer es ejecutar la función `programador_publicar` (`SECURITY DEFINER`), que
-hace el upsert como propietario. RLS sigue activo en ambas tablas sin ninguna
-política. Si la clave se filtrara, lo peor posible es que alguien meta filas
-basura; no puede leer tu correo. El brief lee con la clave de servicio a través
-del conector de Supabase, que nunca sale de Anthropic.
+- La **contraseña de app de Apple** y el **token del cron** viven en el Vault
+  de Supabase. La Edge Function los lee con `programador_secreto(nombre)`,
+  una función `SECURITY DEFINER` que solo puede ejecutar `service_role`.
+  No hay ningún secreto en el código ni en variables de entorno propias.
+- La Edge Function tiene `verify_jwt` apagado porque `pg_net` no manda JWT;
+  a cambio exige la cabecera `x-programador-token` igual al secreto del Vault.
+  Sin ella responde 401.
+- Escribe con la clave de servicio que Supabase inyecta en la función, a
+  través de la misma RPC `programador_publicar` que ya estaba probada en vivo.
+  RLS sigue activo en todas las tablas sin políticas para `anon`.
+- El brief lee con el conector de Supabase (solo `select`), que nunca sale de
+  Anthropic.
 
-Por qué una función y no un `INSERT` directo: Postgres exige que toda fila
-devuelta por `RETURNING` pase una política de `SELECT`, y PostgREST siempre usa
-`RETURNING`. «Insertar sin poder leer» no se puede expresar con políticas; se
-comprobó reproduciendo el fallo en SQL puro como `anon`. La función además
-permite un upsert real: si cambian los flags o el enrutado de un mensaje ya
-publicado, se corrigen en la siguiente publicación.
-
-### Poner el Mac a publicar
-
-Es el único trabajo que queda en tus manos, y es una vez:
+### Lo que queda en tus manos (una vez)
 
 1. `account.apple.com` → Contraseñas específicas de app → una nueva para
-   «Programador».
-2. `git clone` de este repositorio, `python3 -m venv .venv`,
-   `./.venv/bin/pip install -e .`.
-3. `cp .env.example .env` y rellena `PROGRAMADOR_APP_PASSWORD` y
-   `PROGRAMADOR_SUPABASE_KEY` (la URL ya viene puesta).
-4. `cp config/entities.example.yaml config/entities.yaml` (los `CAMBIAME` puedes
-   dejarlos para después: sin ellos todo cae en `personal`, que ya es útil).
-5. `set -a && . ./.env && set +a && ./.venv/bin/programador-doctor` y después
-   `./.venv/bin/programador-sync`. La primera línea `[supabase] publicados …`
-   es la confirmación.
-6. `scripts/com.lester.programador.sync.plist` a `~/Library/LaunchAgents/` con
-   las rutas cambiadas, y `launchctl load`.
+   «Programador». Se guarda en el Vault con
+   `select vault.create_secret('<contraseña>', 'icloud_app_password', 'App password de Apple para programador-sync');`
+   (o me la pasas y la guardo yo). Es revocable desde Apple en cualquier
+   momento y solo da acceso a Mail.
+2. Rutinas → Resumen matutino → Conectores → añadir **Supabase**. Las rutinas
+   creadas por API no admiten conectores; el prompt ya está cargado
+   (`docs/prompt-resumen-matutino.md`) y, sin el conector, sigue usando
+   Mailopoly de forma provisional.
 
-7. La rutina «Resumen matutino» necesita el conector de Supabase, y las rutinas
-   creadas por API en esta organización no admiten conectores: se edita una vez
-   desde claude.ai (Rutinas → Resumen matutino → Conectores → Supabase) y se
-   pega el prompt de `docs/prompt-resumen-matutino.md`.
+Hasta que exista el secreto, cada pasada del cron deja en `programador_sync_log`
+la fila «Faltan los secretos icloud_email / icloud_app_password en Vault», y el
+brief sigue con Mailopoly sin decir nada. En cuanto exista, la siguiente pasada
+publica los últimos 3 días (hasta 120 mensajes por pasada; el resto en las
+siguientes) y el brief deja de usar Mailopoly.
 
-A partir de ahí el brief del día siguiente lee iCloud sin Mailopoly y sin
-reenvíos. Si el Mac está apagado a las 08:00, el brief lo dice; no inventa.
+### El camino del Mac (opcional, ya no hace falta)
+
+`programador-sync` en el Mac sigue existiendo y sigue publicando con la clave
+publicable si `PROGRAMADOR_SUPABASE_KEY` está en `.env`
+(`scripts/com.lester.programador.sync.plist` para launchd). Es útil si algún día
+quieres el índice local con FTS5 y las 15 herramientas MCP, pero el brief ya no
+depende de él.
 
 ## Qué NO hace todavía
 
