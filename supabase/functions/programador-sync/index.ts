@@ -28,7 +28,9 @@ const WINDOW_DAYS_MAX = 14;
 const RECON_EXTRA_DAYS = 2;
 const MAX_NEW_PER_RUN = 120;
 const FETCH_CHUNK = 25;
-const BODY_FETCH_BYTES = 16000;
+const PLAIN_FETCH_BYTES = 16000; // bytes crudos que se piden de una parte text/plain
+const HTML_FETCH_BYTES = 64000; // el HTML de newsletter arrastra mucho <head>/<style>; hace falta mas
+const MIN_BODY_QUALITY = 200; // caracteres visibles a partir de los cuales el text/plain se da por bueno
 const BODY_LIMIT = 4000;
 const SNIPPET_LIMIT = 240;
 const PUBLISH_BATCH = 100;
@@ -165,19 +167,50 @@ const HTML_ENTITIES: Record<string, string> = {
   oacute: "ó", uacute: "ú", ntilde: "ñ", Aacute: "Á", Eacute: "É", Iacute: "Í", Oacute: "Ó", Uacute: "Ú",
   Ntilde: "Ñ", uuml: "ü", Uuml: "Ü", iquest: "¿", iexcl: "¡", euro: "€", copy: "©", reg: "®", hellip: "…",
   ndash: "–", mdash: "—", laquo: "«", raquo: "»", rsquo: "’", lsquo: "‘", ldquo: "“", rdquo: "”",
+  zwnj: "", zwj: "", shy: "", thinsp: " ", ensp: " ", emsp: " ", bull: "•", middot: "·", trade: "™",
+  deg: "°", times: "×", agrave: "à", egrave: "è", igrave: "ì", ograve: "ò", ugrave: "ù", ccedil: "ç",
+  Ccedil: "Ç", ouml: "ö", auml: "ä", szlig: "ß", ordm: "º", ordf: "ª", pound: "£", dollar: "$",
 };
 
+// Caracteres invisibles que los newsletters usan como relleno del preheader.
+const INVISIBLE_RE = /[\u00AD\u034F\u200B-\u200F\u2060\u2061-\u2064\uFEFF]/g;
+
+function stripInvisible(text: string): string {
+  return text.replace(INVISIBLE_RE, "");
+}
+
+// Heuristica: un text/plain que en realidad trae HTML/CSS (muy comun en newsletters).
+function looksHtml(text: string): boolean {
+  const head = text.slice(0, 4000);
+  return /<!doctype\s|<html[\s>]|<body[\s>]|<table[\s>]|<div[\s>]|<td[\s>]|<p[\s>]|<br\s*\/?>|<style[\s>]|@import\s+url|<!--/i.test(head) ||
+    (head.match(/&[a-zA-Z]{2,8};/g) ?? []).length >= 5;
+}
+
+// Caracteres "con contenido": sin espacios, invisibles ni signos de relleno.
+function visibleLength(text: string): number {
+  return stripInvisible(text).replace(/[\s\u00A0|_\-=*~.·•]+/g, "").length;
+}
+
 function htmlToText(html: string): string {
-  let s = html.replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, " ");
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
+  // Bloques sin texto util; si el HTML viene truncado y no cierran, se descartan hasta el final.
+  let s = html.replace(/<(script|style|head|title)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, " ");
+  s = s.replace(/<!--[\s\S]*?(?:-->|$)/g, " ");
   s = s.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|tr|li|h[1-6]|table|blockquote)>/gi, "\n");
-  s = s.replace(/<[^>]+>/g, " ");
+  s = s.replace(/<[^>]*>/g, " ");
+  s = s.replace(/<[^>]*$/, " "); // etiqueta cortada por el truncado
+  s = s.replace(/^[^<]*?>/, " "); // resto de etiqueta si el fragmento empieza a mitad
+  // CSS suelto (text/plain que en realidad es la hoja de estilos del newsletter)
+  s = s.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ");
+  s = s.replace(/@import\s+url\([^)]*\)\s*;?/gi, " ");
+  s = s.replace(/@media[^{]*\{[\s\S]*?\}\s*\}/gi, " ");
+  s = s.replace(/(?:^|\n)\s*[a-zA-Z.#*:\[\]="'\-,>\s]{1,120}\{[^{}]*\}/g, "\n");
   s = s.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, e: string) => {
     if (e.startsWith("#x")) return String.fromCodePoint(parseInt(e.slice(2), 16));
     if (e.startsWith("#")) return String.fromCodePoint(parseInt(e.slice(1), 10));
     return HTML_ENTITIES[e] ?? m;
   });
-  return s.replace(/[ \t\r\f\v]+/g, " ").replace(/\s*\n\s*/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  s = stripInvisible(s);
+  return s.replace(/[ \t\r\f\v\u00A0]+/g, " ").replace(/\s*\n\s*/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function collapse(text: string): string {
@@ -489,8 +522,56 @@ function decodeBody(bytes: Uint8Array, part: Part): string {
   else if (enc === "quoted-printable") raw = qpToBytes(new TextDecoder("latin1").decode(bytes));
   else raw = bytes;
   let text = decodeBytes(raw, part.charset);
-  if (part.subtype === "html") text = htmlToText(text);
+  if (part.subtype === "html" || looksHtml(text)) text = htmlToText(text);
+  else text = stripInvisible(text);
   return text.replace(/\r\n/g, "\n").trim();
+}
+
+// Pide una seccion MIME (los primeros `bytes`) y devuelve sus bytes crudos.
+async function fetchSection(imap: Imap, uid: number, section: string, bytes: number): Promise<Uint8Array | null> {
+  const br = await imap.command(`UID FETCH ${uid} (BODY.PEEK[${section}]<0.${bytes}>)`);
+  if (!br.ok) return null;
+  for (const bu of br.untagged) {
+    if (!/^\* \d+ FETCH /.test(bu.text)) continue;
+    const bl = tokenize(bu.text)[3];
+    if (!Array.isArray(bl)) continue;
+    const bi = fetchItems(bl);
+    const b = litText(bi.get(`BODY[${section.toUpperCase()}]`) ?? bi.get(`BODY[${section}]`) ?? null, bu.literals);
+    if (b) return b;
+  }
+  return null;
+}
+
+// Cuerpo legible de un mensaje: une los text/plain (un multipart/mixed puede
+// traer varios, p.ej. texto-PDF-texto) y, si lo que queda es pobre o vacio y
+// hay text/html, convierte el HTML. Devuelve el texto y si quedo truncado.
+async function readBody(imap: Imap, uid: number, parts: Part[]): Promise<{ text: string; truncado: boolean }> {
+  const textParts = parts.filter((p) => p.type === "text" && p.disposition !== "attachment");
+  const plains = textParts.filter((p) => p.subtype === "plain");
+  const html = textParts.find((p) => p.subtype === "html") ?? null;
+  let text = "";
+  let truncado = false;
+  const chunks: string[] = [];
+  for (const p of plains.slice(0, 4)) {
+    if (p.size <= 8) continue; // "\r\n" o equivalente: parte vacia, no merece un viaje
+    const bytes = await fetchSection(imap, uid, p.section, PLAIN_FETCH_BYTES);
+    if (!bytes) continue;
+    const t = decodeBody(bytes, p);
+    if (t) chunks.push(t);
+    if (p.size > PLAIN_FETCH_BYTES) truncado = true;
+  }
+  text = chunks.join("\n\n").trim();
+  if (html && visibleLength(text) < MIN_BODY_QUALITY) {
+    const bytes = await fetchSection(imap, uid, html.section, HTML_FETCH_BYTES);
+    if (bytes) {
+      const t = decodeBody(bytes, html);
+      if (visibleLength(t) > visibleLength(text)) {
+        text = t;
+        truncado = html.size > HTML_FETCH_BYTES;
+      }
+    }
+  }
+  return { text, truncado };
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +616,7 @@ function route(rules: Rule[], row: Row): { entity: string; reason: string } {
   const domainN = fromN.includes("@") ? fromN.split("@")[1] : "";
   const recipients = new Set([...row.to_addrs, ...row.cc_addrs].map(normalize));
   const subjectN = normalize(row.subject);
-  const bodyN = normalize(row.body_text);
+  const bodyN = normalize(`${row.body_text} ${row.attachments.join(" ")}`);
   for (const r of rules) {
     for (const d of r.from_domain ?? []) {
       const dn = normalize(d).replace(/^@/, "");
@@ -685,31 +766,13 @@ async function syncFolder(imap: Imap, account: string, folder: string, rules: Ru
       const cc = parseAddresses(headers["cc"] ?? "").map((a) => a.addr);
       const date = parseDateHeader(headers["date"], str(items.get("INTERNALDATE")));
 
-      const textParts = parts.filter((p) => p.type === "text" && p.disposition !== "attachment");
-      const bodyPart = textParts.find((p) => p.subtype === "plain") ?? textParts.find((p) => p.subtype === "html") ?? null;
+      const textSections = new Set(parts.filter((p) => p.type === "text" && p.disposition !== "attachment").map((p) => p.section));
       const attachments = parts
-        .filter((p) => p !== bodyPart && (p.disposition === "attachment" || (p.filename && p.type !== "text")))
+        .filter((p) => !textSections.has(p.section) && (p.disposition === "attachment" || (p.filename && p.type !== "text")))
         .map((p) => p.filename ?? `${p.type}/${p.subtype}`)
         .filter((v, idx, arr) => arr.indexOf(v) === idx);
 
-      let body = "";
-      let truncado = false;
-      if (bodyPart) {
-        const br = await imap.command(`UID FETCH ${uid} (BODY.PEEK[${bodyPart.section}]<0.${BODY_FETCH_BYTES}>)`);
-        if (br.ok) {
-          for (const bu of br.untagged) {
-            if (!/^\* \d+ FETCH /.test(bu.text)) continue;
-            const bl = tokenize(bu.text)[3];
-            if (!Array.isArray(bl)) continue;
-            const bi = fetchItems(bl);
-            const bytes = litText(bi.get(`BODY[${bodyPart.section.toUpperCase()}]`) ?? bi.get(`BODY[${bodyPart.section}]`) ?? null, bu.literals);
-            if (bytes) {
-              body = decodeBody(bytes, bodyPart);
-              truncado = bodyPart.size > BODY_FETCH_BYTES;
-            }
-          }
-        }
-      }
+      let { text: body, truncado } = await readBody(imap, uid, parts);
       if (body.length > BODY_LIMIT) { body = body.slice(0, BODY_LIMIT); truncado = true; }
 
       const row: Row = {
