@@ -193,21 +193,23 @@ programador-sync (Edge Function) ──IMAP──> iCloud        Resumen matutin
 
 ### Lo que queda en tus manos (una vez)
 
-1. `account.apple.com` → Contraseñas específicas de app → una nueva para
-   «Programador». Se guarda en el Vault con
-   `select vault.create_secret('<contraseña>', 'icloud_app_password', 'App password de Apple para programador-sync');`
-   (o me la pasas y la guardo yo). Es revocable desde Apple en cualquier
-   momento y solo da acceso a Mail.
-2. Rutinas → Resumen matutino → Conectores → añadir **Supabase**. Las rutinas
+La contraseña de app de Apple ya está en el Vault (`icloud_app_password`,
+26 sep 2026) y el cron publica cada 10 minutos: a la fecha, 24/24 mensajes de
+los últimos 3 días con cuerpo legible y enrutados. Queda **un solo clic**:
+
+1. Rutinas → Resumen matutino → Conectores → añadir **Supabase**. Las rutinas
    creadas por API no admiten conectores; el prompt ya está cargado
    (`docs/prompt-resumen-matutino.md`) y, sin el conector, sigue usando
    Mailopoly de forma provisional.
 
-Hasta que exista el secreto, cada pasada del cron deja en `programador_sync_log`
-la fila «Faltan los secretos icloud_email / icloud_app_password en Vault», y el
-brief sigue con Mailopoly sin decir nada. En cuanto exista, la siguiente pasada
-publica los últimos 3 días (hasta 120 mensajes por pasada; el resto en las
-siguientes) y el brief deja de usar Mailopoly.
+Cuando el brief lleve unos días leyendo de Supabase, revoca en
+`account.apple.com` la contraseña de app que usa Mailopoly: es la única copia de
+tu correo fuera de iCloud que sigue viva.
+
+Cómo comprobar que sigue vivo sin abrir nada: la última fila de
+`programador_sync_log` con `error is null` tiene `synced_at` de hace menos de
+10 minutos. Si `error` trae «LOGIN en iCloud», Apple revocó la contraseña y hay
+que crear otra (`select vault.update_secret(...)`).
 
 ### El camino del Mac (opcional, ya no hace falta)
 
